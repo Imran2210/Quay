@@ -929,6 +929,7 @@ function rowToQuote(row: OffRampQuoteRow): StoredOffRampQuote {
     sellAmount: row.sellAmount,
     buyCurrency: row.buyCurrency,
     price: row.price,
+    withdrawType: row.withdrawType ?? undefined,
     ...(row.quotedRate !== null &&
     row.quotedTargetAmount !== null &&
     row.quotedFeeAmount !== null &&
@@ -991,6 +992,7 @@ export class DrizzleOffRampStateRepository implements OffRampStateRepository {
       sellAmount: quote.sellAmount,
       buyCurrency: quote.buyCurrency,
       price: quote.price,
+      withdrawType: quote.withdrawType ?? null,
       quotedRate: quote.quotedAmounts?.rate ?? null,
       quotedTargetAmount: quote.quotedAmounts?.targetAmount ?? null,
       quotedFeeAmount: quote.quotedAmounts?.feeAmount ?? null,
