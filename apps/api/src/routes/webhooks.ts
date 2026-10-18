@@ -150,7 +150,7 @@ export function webhookRoutes(c: Container): Hono<{ Variables: AuthVariables }> 
 
     await c.webhooks.updateQueueEntry(id, {
       status: "pending",
-      attempts: entry.attempts, // preserve history count; worker increments on next attempt
+      attempts: entry.status === "pending" ? entry.attempts : 0, // Give dead or delivered entries a fresh attempt budget; keep count for pending entries accelerated mid-backoff
       nextAttemptAt: Date.now(),
       lastStatusCode: entry.lastStatusCode,
       lastError: entry.lastError,

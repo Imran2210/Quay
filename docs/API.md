@@ -1356,10 +1356,12 @@ merchant's webhook is reported as **404**, the same as one that does not exist.
 
 | Entry status | Effect                                          |
 | ------------ | ----------------------------------------------- |
-| `dead`       | Re-queued as `pending`, `nextAttemptAt = now`.  |
-| `pending`    | `nextAttemptAt` reset to now (accelerates next attempt). |
-| `delivered`  | Re-queued as `pending` (re-sends an already-delivered event). |
+| `dead`       | Re-queued as `pending`, fresh attempt budget (`attempts = 0`), `nextAttemptAt = now`. |
+| `pending`    | `nextAttemptAt` reset to now (accelerates next attempt; keeps stored attempt count). |
+| `delivered`  | Re-queued as `pending`, fresh attempt budget (`attempts = 0`) (re-sends an already-delivered event). |
 | `claimed`    | **409** — delivery is in-flight; wait for it to settle. |
+
+Replay restarts the retry budget for `dead` or `delivered` entries. In `webhook_deliveries`, `attempt` starts again at 1 for the replayed run (all delivery attempts remain grouped by `queue_entry_id` and ordered by `createdAt`).
 
 **202**
 ```json

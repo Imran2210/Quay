@@ -219,6 +219,40 @@ describe("WebhookWorker", () => {
     await makeWorker(repo, sender).runOnce();
     expect(await repo.countPending()).toBe(0);
   });
+
+  it("a replayed dead entry that gets one 503 is pending again with attempts: 1, not dead", async () => {
+    const { repo, hook, sender } = await seed();
+    await sender.enqueue([hook], "lnk_1", { event: "link.paid", data: {} });
+
+    const entryId = repo.queue[0]!.id;
+    // Simulate dead-lettered entry after 5 failed attempts
+    await repo.updateQueueEntry(entryId, {
+      status: "dead",
+      attempts: 5,
+      nextAttemptAt: Date.now(),
+      lastStatusCode: 500,
+      lastError: "HTTP 500",
+    });
+
+    // Simulate replay reset: status -> pending, attempts -> 0
+    await repo.updateQueueEntry(entryId, {
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      lastStatusCode: 500,
+      lastError: "HTTP 500",
+    });
+
+    // Worker receives 503 on the replayed attempt
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    const worker = makeWorker(repo, sender, { maxAttempts: 5 });
+    await worker.runOnce();
+
+    expect(repo.queue[0]!.status).toBe("pending");
+    expect(repo.queue[0]!.attempts).toBe(1);
+    expect(repo.deliveries).toHaveLength(1);
+    expect(repo.deliveries[0]!.attempt).toBe(1);
+  });
 });
 
 /** Wait until the head row's backoff has elapsed (baseDelayMs is 1ms in tests). */
