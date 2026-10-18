@@ -7,11 +7,17 @@ import { checkBalance, findAssetBalance, messageFor } from "./trustline-check";
 
 interface CacheEntry {
   expiresAt: number;
-  error: CannotReceiveError | null; // null = "can receive", cached as a pass
 }
 
 const PREFLIGHT_CACHE_TTL_MS = 60_000;
 
+// Failures are not cached at all: a seller who just added the trustline must be
+// accepted on the next call, and a cached trustlineUri would replay a stale
+// sequence number anyway.
+
+// SEP-23: wraps a G-address and a 64-bit id into an M-address. The id is
+// carried inside the destination itself, so it survives wallets that drop,
+// mangle, or overwrite the memo — unlike MEMO_TEXT correlation.
 /** SEP-23: wraps a G-address and a 64-bit id into an M-address. The id is
  *  carried inside the destination itself, so it survives wallets that drop,
  *  mangle, or overwrite the memo — unlike MEMO_TEXT correlation. */
@@ -74,23 +80,18 @@ export class StellarRail implements RailPort {
     const cacheKey = `${account}:${asset.code}:${asset.issuer ?? "native"}`;
     const cached = this.preflightCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
-      if (cached.error) throw cached.error;
       return;
     }
 
-    try {
-      await this.checkCanReceive(account, asset);
-      this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS, error: null });
-    } catch (err) {
-      if (err instanceof CannotReceiveError) {
-        this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS, error: err });
-      }
-      throw err;
-    }
+    // Failures are never cached: the seller may fix the account (e.g. add the
+    // trustline) right after seeing the error, and the next call must re-check.
+    // A cached trustlineUri would also replay a stale sequence number.
+    await this.checkCanReceive(account, asset);
+    this.preflightCache.set(cacheKey, { expiresAt: Date.now() + PREFLIGHT_CACHE_TTL_MS });
   }
 
   private async checkCanReceive(account: string, asset: AssetRef): Promise<void> {
-    // Typed from loadAccount's own return, not a guessed SDK type-export path —
+    // Typed from loadAccount's own return, not a guessed SDK-type-export path —
     // the exact Horizon.* namespace for this has moved between SDK versions.
     let horizonAccount: Awaited<ReturnType<Horizon.Server["loadAccount"]>>;
     try {
