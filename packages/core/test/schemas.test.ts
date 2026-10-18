@@ -6,6 +6,8 @@ import {
   registerWebhookSchema,
   listWebhookDeliveriesQuerySchema,
   cashOutSchema,
+  cashOutQuoteQuerySchema,
+  currencyCodeSchema,
   transferSentSchema,
 } from "../src/schemas";
 
@@ -216,5 +218,33 @@ describe("transferSentSchema", () => {
     expect(transferSentSchema.safeParse({ hash: "g".repeat(64) }).success).toBe(false);
     expect(transferSentSchema.safeParse({ hash: "" }).success).toBe(false);
     expect(transferSentSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+// ── currencyCodeSchema / cashOutQuoteQuerySchema (issue 4.53) ───────────────
+
+describe("currencyCodeSchema", () => {
+  it("normalises lower-case 3-letter codes to upper-case and trims whitespace", () => {
+    expect(currencyCodeSchema.parse("ngn")).toBe("NGN");
+    expect(currencyCodeSchema.parse("  usd  ")).toBe("USD");
+    expect(currencyCodeSchema.parse("EUR")).toBe("EUR");
+  });
+
+  it("rejects codes that are not 3 ASCII letters", () => {
+    for (const code of ["", "NG", "NGNN", "N N", "123", "$$$"]) {
+      expect(currencyCodeSchema.safeParse(code).success).toBe(false);
+    }
+  });
+});
+
+describe("cashOutQuoteQuerySchema", () => {
+  it("normalises targetCurrency and accepts an optional withdrawType", () => {
+    const res = cashOutQuoteQuerySchema.parse({ targetCurrency: "ngn", withdrawType: "bank_account" });
+    expect(res).toEqual({ targetCurrency: "NGN", withdrawType: "bank_account" });
+  });
+
+  it("rejects missing or malformed targetCurrency", () => {
+    expect(cashOutQuoteQuerySchema.safeParse({}).success).toBe(false);
+    expect(cashOutQuoteQuerySchema.safeParse({ targetCurrency: "123" }).success).toBe(false);
   });
 });
