@@ -41,7 +41,7 @@ graph LR
   `SellerRepository`, `WebhookRepository`, `WatcherStateRepository`).
 - **`packages/stellar`** — implements `RailPort` (`StellarRail`, builds SEP-7 pay URIs)
   and `WatcherPort` (`HorizonWatcher`, polls Horizon for payments and normalizes them).
-- **`packages/offramp`** — implements `OffRampPort` twice: `MockAnchorOffRamp` (offline,
+- **[`packages/offramp`](../packages/offramp/README.md)** — implements `OffRampPort` twice: `MockAnchorOffRamp` (offline,
   fake FX rate, no money moves — the default) and `TestAnchorOffRamp` (real SEP-10 → SEP-38
   → SEP-6 against `testanchor.stellar.org`). Nothing under `src/` here holds a keypair any
   more (#207): the old SEP-10 client moved to `test/sep10.ts` as a test-only reference, and the

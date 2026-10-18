@@ -476,9 +476,9 @@ required correction.
 **Symptom:** The link becomes `offramp_failed`. If the seller has an active
 webhook registration, their endpoint receives `offramp.failed` with the
 anchor's `reason`; otherwise check the authenticated link detail. Logs contain
-`anchor.sep6.status.ok` with `status` equal to `error`, `refunded`, or
-`expired`, followed by `link.transition` from `offramp_pending` to
-`offramp_failed`. `mapSep6Status` and `TestAnchorOffRamp.status` in
+`anchor.sep6.status.ok` with `status` equal to `error`, `refunded`,
+`expired`, `no_market`, `too_small`, or `too_large`, followed by
+`link.transition` from `offramp_pending` to `offramp_failed`. `mapSep6Status` and `TestAnchorOffRamp.status` in
 `packages/offramp/src/testanchor.ts` perform the mapping;
 `pollCashOuts` in `apps/api/src/services/link-service.ts` persists the
 transition and webhook.
