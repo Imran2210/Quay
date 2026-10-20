@@ -25,7 +25,12 @@ describe("kycRoutes — consent endpoints (issue 4.26)", () => {
     updatedAt: 1,
   };
 
-  async function harness(scopes: ApiKeyScope[], authKind: "session" | "api_key" = "api_key") {
+  async function harness(
+    scopes: ApiKeyScope[],
+    authKind: "session" | "api_key" = "api_key",
+    customRecord?: KycRecord,
+  ) {
+    const activeRecord = customRecord ?? record;
     const container = await createTestContainer();
     const submitted: Record<string, string>[] = [];
     const consents: KycConsent[] = [];
@@ -35,11 +40,15 @@ describe("kycRoutes — consent endpoints (issue 4.26)", () => {
       anchorDomain: "testanchor.stellar.org",
       kyc: {
         async status(customer: AnchorCustomer) {
-          return record;
+          return activeRecord;
         },
         async submit(customer: AnchorCustomer, fields: Record<string, string>) {
           submitted.push(fields);
-          return { ...record, providedFields: { ...record.providedFields, ...fields } };
+          return {
+            ...activeRecord,
+            providedFields: { ...activeRecord.providedFields, ...fields },
+            sentFields: Object.keys(fields),
+          };
         },
       },
       kycConsents: {
@@ -304,6 +313,86 @@ describe("kycRoutes — consent endpoints (issue 4.26)", () => {
 
       expect(res.status).toBe(200);
       expect(submitted).toHaveLength(1);
+      container.client.close();
+    });
+
+    it("does not send profile fields to anchor on first submission without consent and returns discovery", async () => {
+      const firstSubRecord: KycRecord = {
+        ...record,
+        status: "unsubmitted",
+        requiredFields: [],
+        providedFields: {},
+      };
+      const { app, container, key, submitted } = await harness(["offramp:initiate"], "api_key", firstSubRecord);
+
+      const res = await app.request("/", {
+        method: "PUT",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({ first_name: "Ada", id_number: "1" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as { providedFields: Record<string, string> };
+      // Profile fields in the body do not reach submit
+      expect(submitted).toEqual([{}]);
+      // Does not return 200 with fields sent
+      expect(body.providedFields).toEqual({});
+      container.client.close();
+    });
+
+    it("sends only consented fields on first submission when consent exists", async () => {
+      const firstSubRecord: KycRecord = {
+        ...record,
+        status: "unsubmitted",
+        requiredFields: [],
+        providedFields: {},
+      };
+      const { app, container, key, submitted, consents, seller } = await harness(
+        ["offramp:initiate"],
+        "api_key",
+        firstSubRecord,
+      );
+      consents.push({
+        id: "cnc_1",
+        sellerId: seller.id,
+        anchorDomain: "testanchor.stellar.org",
+        fields: ["first_name"], // consent covers first_name only
+        grantedAt: Date.now(),
+        revokedAt: null,
+        grantedVia: "session",
+        noticeVersion: "1.0",
+      });
+
+      const res = await app.request("/", {
+        method: "PUT",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({ first_name: "Ada", id_number: "1" }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json() as { providedFields: Record<string, string> };
+      expect(submitted).toEqual([{ first_name: "Ada" }]);
+      expect(body.providedFields).toEqual({ first_name: "Ada" });
+      container.client.close();
+    });
+
+    it("allows empty body {} on first submission for discovery without consent", async () => {
+      const firstSubRecord: KycRecord = {
+        ...record,
+        status: "unsubmitted",
+        requiredFields: [],
+        providedFields: {},
+      };
+      const { app, container, key, submitted } = await harness(["offramp:initiate"], "api_key", firstSubRecord);
+
+      const res = await app.request("/", {
+        method: "PUT",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+
+      expect(res.status).toBe(200);
+      expect(submitted).toEqual([{}]);
       container.client.close();
     });
   });

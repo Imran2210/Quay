@@ -1,0 +1,18 @@
+{
+  "default_branch": "dev",
+  "branches": [
+    "dev",
+    "fix/issue-360-2-9-receive-preflight-caches-failures-for-60",
+    "origin"
+  ],
+  "parent": {
+    "dev": null,
+    "fix/issue-360-2-9-receive-preflight-caches-failures-for-60": "dev",
+    "origin": "dev"
+  },
+  "order": [
+    "dev",
+    "fix/issue-360-2-9-receive-preflight-caches-failures-for-60",
+    "origin"
+  ]
+}

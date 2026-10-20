@@ -4,6 +4,7 @@ import type { AnchorCustomer } from "@checkout/core";
 import { AnchorDiscovery, SellerAnchorAuth } from "../src/anchor-session";
 import { clearStellarTomlCache } from "../src/sep1";
 import { clearSep6InfoCache, getSep6Transaction, Sep6TransactionError } from "../src/sep6";
+import { AnchorHttpError } from "../src/anchor-error";
 import { TestAnchorOffRamp } from "../src/testanchor";
 import { FakeAnchorSessionRepository, FakeOffRampStateRepository } from "./fake-state";
 
@@ -309,3 +310,34 @@ describe("reconciliation fields", () => {
     expect(await state.getJob("wd_1")).toMatchObject({ amountIn: "10", stellarTransactionId: HASH });
   });
 });
+
+describe("getSep6Transaction error handling and pass-through", () => {
+  it("throws AnchorHttpError on non-OK response from the anchor", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("transaction not found", { status: 404 })),
+    );
+    await expect(getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_missing")).rejects.toMatchObject({
+      name: "AnchorHttpError",
+      sep: "6",
+      op: "transaction fetch",
+      status: 404,
+      body: "transaction not found",
+      message: "SEP-6 transaction fetch failed: 404",
+    });
+  });
+
+  it("passes through message and amount_out when present on transaction", async () => {
+    stubAnchor();
+    transactionBody = {
+      id: "wd_1",
+      status: "pending_anchor",
+      amount_out: "50.00",
+      message: "waiting on bank processing",
+    };
+    const tx = await getSep6Transaction(ORIGIN + "/sep6", "jwt", "wd_1");
+    expect(tx.amountOut).toBe("50.00");
+    expect(tx.message).toBe("waiting on bank processing");
+  });
+});
+

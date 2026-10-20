@@ -157,8 +157,40 @@ describe("POST /webhooks/deliveries/:id/replay", () => {
 
     const after = await container.webhooks.findQueueEntry(entry.id);
     expect(after?.status).toBe("pending");
-    // The attempt history is preserved — replay resumes the count, not resets it.
-    expect(after?.attempts).toBe(5);
+    // Replay gives dead/delivered entries a fresh retry budget.
+    expect(after?.attempts).toBe(0);
+  });
+
+  it("preserves attempt count when replaying an already pending entry", async () => {
+    const seller = container.seller;
+    const hook = await container.webhooks.create({
+      sellerId: seller.id,
+      url: "https://example.com/replay-pending",
+      secret: "replay-secret-001",
+    });
+    const entry = await container.webhooks.enqueue({
+      id: "wqe_replay_pending",
+      webhookId: hook.id,
+      linkId: "lnk_1",
+      event: "link.paid",
+      payload: JSON.stringify({ event: "link.paid" }),
+      nextAttemptAt: Date.now() + 60_000,
+      createdAt: Date.now(),
+    });
+    await container.webhooks.updateQueueEntry(entry.id, {
+      status: "pending",
+      attempts: 2,
+      nextAttemptAt: entry.nextAttemptAt,
+      lastStatusCode: 503,
+      lastError: "HTTP 503",
+    });
+
+    const res = await req(`/webhooks/deliveries/${entry.id}/replay`, { method: "POST" });
+    expect(res.status).toBe(202);
+
+    const after = await container.webhooks.findQueueEntry(entry.id);
+    expect(after?.status).toBe("pending");
+    expect(after?.attempts).toBe(2);
   });
 
   it("does not let one seller replay another seller's delivery", async () => {

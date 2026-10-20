@@ -287,30 +287,49 @@ export function kycRoutes(c: Container): Hono<{ Variables: AuthVariables }> {
         return ctx.json({ error: "server_error", message: "No anchor configured" }, 500);
       }
 
-      // Determine which fields are about to be sent (the "send" set from 4.25)
-      // These are the fields that are either new/updated in this request, or already on file
-      // and the anchor requires them (requiredFields). The anchor will receive all providedFields.
-      const allProvidedFields = { ...record.providedFields, ...fields };
-      const fieldsToSend = Object.keys(allProvidedFields).filter((f) => record.requiredFields.some((rf) => rf.name === f));
+      const isFirstSubmission = record.requiredFields.length === 0;
+      let fieldsToSendToAnchor: Record<string, string>;
 
-      if (fieldsToSend.length > 0) {
+      if (isFirstSubmission) {
+        // On first submission, requiredFields is empty because discovery has not run yet.
+        // Never send unconsented profile fields to the anchor:
+        // - Without active consent, send no fields ({}) so discovery runs safely (same as PUT {})
+        // - If active consent exists, transmit only fields covered by that consent
         const consent = await c.kycConsents.active(seller.id, anchorDomain);
         if (!consent) {
-          return ctx.json({ error: "consent_required", anchorDomain, fields: fieldsToSend }, 403);
+          fieldsToSendToAnchor = {};
+        } else {
+          fieldsToSendToAnchor = Object.fromEntries(
+            Object.entries(fields).filter(([k]) => consent.fields.includes(k)),
+          );
         }
+      } else {
+        // Determine which fields are about to be sent (the "send" set from 4.25)
+        // These are the fields that are either new/updated in this request, or already on file
+        // and the anchor requires them (requiredFields). The anchor will receive all providedFields.
+        const allProvidedFields = { ...record.providedFields, ...fields };
+        const fieldsToSend = Object.keys(allProvidedFields).filter((f) => record.requiredFields.some((rf) => rf.name === f));
 
-        // Check that all fields to be sent are covered by the consent
-        const uncovered = fieldsToSend.filter((f) => !consent.fields.includes(f));
-        if (uncovered.length > 0) {
-          return ctx.json({ error: "consent_required", anchorDomain, fields: uncovered }, 403);
+        if (fieldsToSend.length > 0) {
+          const consent = await c.kycConsents.active(seller.id, anchorDomain);
+          if (!consent) {
+            return ctx.json({ error: "consent_required", anchorDomain, fields: fieldsToSend }, 403);
+          }
+
+          // Check that all fields to be sent are covered by the consent
+          const uncovered = fieldsToSend.filter((f) => !consent.fields.includes(f));
+          if (uncovered.length > 0) {
+            return ctx.json({ error: "consent_required", anchorDomain, fields: uncovered }, 403);
+          }
         }
+        fieldsToSendToAnchor = fields;
       }
 
       // Values typed directly in the KYC form for this anchor in the same session
       // request count as consented for those fields only if the request carries consent: true
       // (handled by the UI calling the consent endpoint first)
 
-      const updatedRecord = await c.kyc.submit(customer, fields);
+      const updatedRecord = await c.kyc.submit(customer, fieldsToSendToAnchor);
       if (updatedRecord.sentFields.length > 0) {
         const sentAt = Date.now();
         await c.db.insert(kycDisclosureFields).values(updatedRecord.sentFields.map((fieldName) => ({
