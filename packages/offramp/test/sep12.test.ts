@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AnchorHttpError } from "../src/anchor-error";
 import {
   deleteSep12Customer,
   getSep12Customer,
   putSep12Callback,
   putSep12Customer,
   putSep12CustomerMultipart,
+  toKycStatus,
+  toProvidedFieldStatus,
 } from "../src/sep12";
 
 const BASE_URL = "https://testanchor.stellar.org";
@@ -16,7 +19,56 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("toProvidedFieldStatus", () => {
+  it("returns an empty array when fields is undefined", () => {
+    expect(toProvidedFieldStatus(undefined)).toEqual([]);
+  });
+
+  it("maps provided field specs with null defaults for missing status or error", () => {
+    const raw = {
+      first_name: { status: "ACCEPTED" as const },
+      photo_id_front: { status: "REJECTED" as const, error: "blurry" },
+      middle_name: {},
+    };
+    expect(toProvidedFieldStatus(raw)).toEqual([
+      { name: "first_name", status: "ACCEPTED", error: null },
+      { name: "photo_id_front", status: "REJECTED", error: "blurry" },
+      { name: "middle_name", status: null, error: null },
+    ]);
+  });
+});
+
+describe("toKycStatus", () => {
+  it("returns PROCESSING and logs a warning when status is missing/undefined", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = toKycStatus(undefined as unknown as string);
+    expect(result).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: undefined }),
+    );
+  });
+
+  it("returns PROCESSING and logs a warning for lower-case 'accepted'", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = toKycStatus("accepted");
+    expect(result).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: "accepted" }),
+    );
+  });
+
+  it.each(["ACCEPTED", "REJECTED", "NEEDS_INFO", "PROCESSING"] as const)(
+    "passes through known status '%s' without logging a warning",
+    (status) => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(toKycStatus(status)).toBe(status);
+      expect(warnSpy).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("deleteSep12Customer", () => {
@@ -224,6 +276,64 @@ describe("getSep12Customer", () => {
       JSON.stringify({ event: "kyc.status.unknown", status: "NEEDS_VERIFICATION" }),
     );
   });
+
+  it("populates providedFieldStatus from the anchor's provided_fields reply", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+          status: "ACCEPTED",
+          provided_fields: {
+            first_name: { status: "ACCEPTED" },
+            photo_id_front: { status: "REJECTED", error: "blurry" },
+            middle_name: {},
+          },
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.providedFieldStatus).toEqual([
+      { name: "first_name", status: "ACCEPTED", error: null },
+      { name: "photo_id_front", status: "REJECTED", error: "blurry" },
+      { name: "middle_name", status: null, error: null },
+    ]);
+  });
+
+  it("returns requiredFields as [] when the reply omits the fields key", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+          status: "PROCESSING",
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.requiredFields).toEqual([]);
+    expect(result.status).toBe("PROCESSING");
+  });
+
+  it("falls back to PROCESSING when the 200 reply omits the status field entirely", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          id: "cust_1",
+        }),
+      ),
+    );
+
+    const result = await getSep12Customer(BASE_URL, JWT, { account: ACCOUNT });
+    expect(result.status).toBe("PROCESSING");
+    expect(warnSpy).toHaveBeenCalledWith(
+      JSON.stringify({ event: "kyc.status.unknown", status: undefined }),
+    );
+  });
 });
 
 describe("putSep12Callback", () => {
@@ -305,5 +415,47 @@ describe("putSep12CustomerMultipart", () => {
     const formData = init.body as FormData;
     expect(formData.get("id")).toBe("cust_existing");
     expect(formData.get("account")).toBeNull();
+  });
+
+  it("rejects with an AnchorHttpError on a 400 response without leaking anchor body text into message", async () => {
+    const anchorBody = "invalid file format uploaded";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(anchorBody, { status: 400 })));
+
+    const fileBlob = new Blob(["fake-bytes"], { type: "image/jpeg" });
+    const errPromise = putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      files: [{ name: "photo_id_front", blob: fileBlob, filename: "front.jpg" }],
+    });
+
+    await expect(errPromise).rejects.toBeInstanceOf(AnchorHttpError);
+    await errPromise.catch((err: AnchorHttpError) => {
+      expect(err.sep).toBe("12");
+      expect(err.op).toBe("customer PUT (files)");
+      expect(err.status).toBe(400);
+      expect(err.message).toBe("SEP-12 customer PUT (files) failed: 400");
+      expect(err.message).not.toContain(anchorBody);
+      expect(err.body).toBe(anchorBody);
+    });
+  });
+
+  it("rejects with an AnchorHttpError on a 500 response without leaking anchor body text into message", async () => {
+    const anchorBody = "internal server error: S3 bucket unreachable";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(anchorBody, { status: 500 })));
+
+    const fileBlob = new Blob(["fake-bytes"], { type: "image/jpeg" });
+    const errPromise = putSep12CustomerMultipart(BASE_URL, JWT, {
+      account: ACCOUNT,
+      files: [{ name: "photo_id_front", blob: fileBlob, filename: "front.jpg" }],
+    });
+
+    await expect(errPromise).rejects.toBeInstanceOf(AnchorHttpError);
+    await errPromise.catch((err: AnchorHttpError) => {
+      expect(err.sep).toBe("12");
+      expect(err.op).toBe("customer PUT (files)");
+      expect(err.status).toBe(500);
+      expect(err.message).toBe("SEP-12 customer PUT (files) failed: 500");
+      expect(err.message).not.toContain(anchorBody);
+      expect(err.body).toBe(anchorBody);
+    });
   });
 });
