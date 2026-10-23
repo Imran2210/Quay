@@ -70,6 +70,9 @@ jobs:
       - name: Docs — every env var apps/api reads is documented
         run: pnpm docs:check-env-docs
 
+      - name: DB — schema and migrations have not drifted
+        run: pnpm db:check
+
       - name: Build
         run: pnpm build
         env:

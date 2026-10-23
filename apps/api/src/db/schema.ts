@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index, uniqueIndex, primaryKey } from "drizzle-orm/sqlite-core";
 
 export const sellers = sqliteTable("sellers", {
   id: text("id").primaryKey(),
@@ -81,7 +81,10 @@ export const linkPayments = sqliteTable("link_payments", {
    *  existed have no value. */
   ledger: integer("ledger"),
   createdAt: integer("created_at").notNull(),
-});
+}, (table) => [
+  index("link_payments_link_id_idx").on(table.linkId),
+  uniqueIndex("link_payments_tx_hash_operation_id_unique").on(table.txHash, table.operationId),
+]);
 
 export const webhooks = sqliteTable("webhooks", {
   id: text("id").primaryKey(),
@@ -109,7 +112,9 @@ export const webhookDeliveries = sqliteTable("webhook_deliveries", {
   ok: integer("ok", { mode: "boolean" }).notNull(),
   error: text("error"),
   createdAt: integer("created_at").notNull(),
-});
+}, (table) => [
+  index("webhook_deliveries_webhook_id_created_at_idx").on(table.webhookId, table.createdAt),
+]);
 
 /**
  * Durable delivery queue.  Each row = one pending (or dead-lettered) delivery.
@@ -137,7 +142,9 @@ export const webhookQueue = sqliteTable("webhook_queue", {
   lastError: text("last_error"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => [
+  index("idx_webhook_queue_due").on(table.status, table.nextAttemptAt),
+]);
 
 export const offrampQuotes = sqliteTable("offramp_quotes", {
   quoteId: text("quote_id").primaryKey(),
@@ -210,7 +217,6 @@ export const offrampJobs = sqliteTable("offramp_jobs", {
 // Keyed by seller (never by link) — identity is submitted once and reused
 // across every link. `fieldsEncrypted` is the only PII column: an AES-256-GCM
 // blob of the seller's submitted field values, opaque without KYC_ENCRYPTION_KEY.
-// Primary key (seller_id, anchor_domain) comes from BOOTSTRAP_SQL, as for anchor_sessions.
 export const sellerKyc = sqliteTable("seller_kyc", {
   sellerId: text("seller_id").notNull(),
   // The anchor home domain this state belongs to; "legacy" for unattributable old rows.
@@ -230,7 +236,10 @@ export const sellerKyc = sqliteTable("seller_kyc", {
   message: text("message"),
   lastSyncedAt: integer("last_synced_at"),
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => [
+  primaryKey({ columns: [table.sellerId, table.anchorDomain] }),
+  index("seller_kyc_callback_token_hash_idx").on(table.callbackTokenHash),
+]);
 
 /** Last successful send of each field to an anchor. Contains names and times only. */
 export const kycDisclosureFields = sqliteTable("kyc_disclosure_fields", {
@@ -245,7 +254,6 @@ export const kycDisclosureFields = sqliteTable("kyc_disclosure_fields", {
 // A seller's SEP-10 session with an anchor, issued to the seller's own wallet.
 // `tokenEncrypted` is a bearer credential for that seller at the anchor — it
 // can read their KYC and start a withdrawal, never move funds.
-// Primary key (seller_id, anchor_domain) comes from BOOTSTRAP_SQL, as for processed_tx.
 export const anchorSessions = sqliteTable("anchor_sessions", {
   sellerId: text("seller_id").notNull(),
   anchorDomain: text("anchor_domain").notNull(),
@@ -253,7 +261,9 @@ export const anchorSessions = sqliteTable("anchor_sessions", {
   tokenEncrypted: text("token_encrypted").notNull(),
   expiresAt: integer("expires_at").notNull(),
   createdAt: integer("created_at").notNull(),
-});
+}, (table) => [
+  primaryKey({ columns: [table.sellerId, table.anchorDomain] }),
+]);
 
 export const watcherCursors = sqliteTable("watcher_cursors", {
   account: text("account").primaryKey(),
@@ -262,10 +272,9 @@ export const watcherCursors = sqliteTable("watcher_cursors", {
 });
 
 // Dedup ledger for the watcher (issue 4.11). Keyed on (tx_hash, operation_id)
-// — see `migrateLegacyProcessedTxTable` in db/client.ts — not tx_hash alone: a
-// Stellar transaction can carry up to 100 operations, and a payment is one
-// operation, not the whole transaction. `operation_id` is Horizon's
-// pagingToken; it's NULL only on rows migrated from before this column
+// — not tx_hash alone: a Stellar transaction can carry up to 100 operations,
+// and a payment is one operation, not the whole transaction. `operation_id` is
+// Horizon's pagingToken; it's NULL only on rows migrated from before this column
 // existed, and `isProcessed` treats a NULL row as "the whole transaction was
 // processed" to preserve the dedup behavior anything already settled had.
 export const processedTx = sqliteTable("processed_tx", {
@@ -273,7 +282,10 @@ export const processedTx = sqliteTable("processed_tx", {
   operationId: text("operation_id"),
   linkId: text("link_id"),
   createdAt: integer("created_at").notNull(),
-});
+}, (table) => [
+  primaryKey({ columns: [table.txHash, table.operationId] }),
+  index("processed_tx_tx_hash_idx").on(table.txHash),
+]);
 
 export const idempotencyKeys = sqliteTable("idempotency_keys", {
   key: text("key").notNull(),
@@ -283,7 +295,9 @@ export const idempotencyKeys = sqliteTable("idempotency_keys", {
   responseStatus: integer("response_status").notNull(),
   responseBody: text("response_body").notNull(),
   createdAt: integer("created_at").notNull(),
-});
+}, (table) => [
+  primaryKey({ columns: [table.key, table.sellerId] }),
+]);
 
 // Logout / compromise revocation for session JWTs, keyed by the token's own
 // `jti`. `expiresAt` mirrors the token's own `exp` — once a token would fail
@@ -352,7 +366,6 @@ export const apiKeys = sqliteTable("api_keys", {
 /**
  * Per-anchor consent record for KYC field disclosure.
  * No PII values in this table — only field names (from SEP-9 catalogue) and metadata.
- * Primary key (seller_id, anchor_domain) enforced in BOOTSTRAP_SQL.
  */
 export const kycConsents = sqliteTable("kyc_consents", {
   id: text("id").primaryKey(),
@@ -363,13 +376,14 @@ export const kycConsents = sqliteTable("kyc_consents", {
   revokedAt: integer("revoked_at"),
   grantedVia: text("granted_via").notNull(), // 'session'
   noticeVersion: text("notice_version").notNull(),
-});
+}, (table) => [
+  uniqueIndex("kyc_consents_seller_anchor_unique").on(table.sellerId, table.anchorDomain),
+]);
 
 /**
  * A seller's reusable identity values, one row per (seller, field) (issue 4.23).
  * Field names are canonical SEP-9 names and are not PII; `valueEncrypted` is an
  * AES-256-GCM blob of exactly one value and never plaintext.
- * Primary key (seller_id, field) comes from BOOTSTRAP_SQL, as for processed_tx.
  */
 export const sellerProfile = sqliteTable("seller_profile", {
   sellerId: text("seller_id").notNull(),
@@ -377,4 +391,6 @@ export const sellerProfile = sqliteTable("seller_profile", {
   valueEncrypted: text("value_encrypted").notNull(),
   source: text("source").notNull(), // 'seller' | 'migrated_from_seller_kyc'
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => [
+  primaryKey({ columns: [table.sellerId, table.field] }),
+]);
