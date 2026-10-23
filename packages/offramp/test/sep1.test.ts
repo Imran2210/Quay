@@ -77,11 +77,51 @@ describe("parseStellarToml", () => {
     expect(p.webAuthEndpoint).toBe("https://anchor.example/auth");
     expect(p.transferServerSep24).toBe("https://anchor.example/sep24");
   });
+
+  it("parses CRLF line endings identically to LF", () => {
+    const lf = parseStellarToml(TOML, "anchor.example");
+    const crlf = parseStellarToml(TOML.replace(/\n/g, "\r\n"), "anchor.example");
+    expect(crlf).toEqual(lf);
+  });
+
+  it("recognises lower-case [[currencies]] as the currency block", () => {
+    const toml = `[[currencies]]\ncode = "USDC"\n[[currencies]]\ncode = "EURC"\n`;
+    const p = parseStellarToml(toml, "anchor.example");
+    expect(p.currencies).toEqual(["USDC", "EURC"]);
+  });
+
+  it("ends the currency block on a different table header and resumes on subsequent [[CURRENCIES]]", () => {
+    const toml = [
+      "[[CURRENCIES]]",
+      'code = "USDC"',
+      "[DOCUMENTATION]",
+      'code = "NOT_A_CURRENCY"',
+      "[[CURRENCIES]]",
+      'code = "EURC"',
+    ].join("\n");
+    const p = parseStellarToml(toml, "anchor.example");
+    expect(p.currencies).toEqual(["USDC", "EURC"]);
+  });
+
+  it("retains an explicit KYC_SERVER that equals the guessed path rather than falling back to transfer server", () => {
+    // Guess for anchor.example is https://anchor.example/sep12. If KYC_SERVER was
+    // absent, it would fall back to TRANSFER_SERVER (https://anchor.example/sep6).
+    // An explicitly declared KYC_SERVER equal to the guess must remain set.
+    const toml = [
+      'TRANSFER_SERVER = "https://anchor.example/sep6"',
+      'KYC_SERVER = "https://anchor.example/sep12"',
+    ].join("\n");
+    const p = parseStellarToml(toml, "anchor.example");
+    expect(p.kycServer).toBe("https://anchor.example/sep12");
+  });
 });
 
 describe("fetchStellarToml", () => {
   beforeEach(() => clearStellarTomlCache());
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("caches, so a second call inside the TTL does not re-fetch", async () => {
     const fetchMock = vi.fn(async () => tomlResponse(TOML));
@@ -92,6 +132,65 @@ describe("fetchStellarToml", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(b).toEqual(a);
+  });
+
+  it("expires the cache after 5 minutes (TTL expiry)", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Just under 5 minutes: cache hit, no new fetch
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Past 5 minutes (TTL expired): re-fetches
+    await vi.advanceTimersByTimeAsync(2);
+    await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("force: true re-fetches inside the TTL and updates the cache", async () => {
+    const toml1 = `SIGNING_KEY = "GKEY1"\n`;
+    const toml2 = `SIGNING_KEY = "GKEY2"\n`;
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(tomlResponse(toml1))
+      .mockResolvedValueOnce(tomlResponse(toml2));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await fetchStellarToml("anchor.example");
+    expect(first.signingKey).toBe("GKEY1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Force re-fetch inside TTL
+    const forced = await fetchStellarToml("anchor.example", { force: true });
+    expect(forced.signingKey).toBe("GKEY2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Next unforced call returns the updated cached result without fetching
+    const cached = await fetchStellarToml("anchor.example");
+    expect(cached.signingKey).toBe("GKEY2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not cache a response when expectedNetworkPassphrase mismatches", async () => {
+    const fetchMock = vi.fn(async () => tomlResponse(TOML));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchStellarToml("anchor.example", { expectedNetworkPassphrase: "Wrong Network Passphrase" }),
+    ).rejects.toBeInstanceOf(Sep1NetworkMismatchError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Subsequent call without passphrase fetches again rather than reusing mismatch
+    const ok = await fetchStellarToml("anchor.example");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(ok.networkPassphrase).toBe("Test SDF Network ; September 2015");
   });
 
   it("refuses an anchor whose declared network is not ours", async () => {
