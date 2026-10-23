@@ -132,14 +132,18 @@ curl -X POST https://quay-api.onrender.com/webhooks \
   -d '{ "url": "https://your-domain.com/api/webhooks/checkout" }'
 ```
 
-Verify incoming HMAC-SHA256 signatures (`x-checkout-signature: sha256=<hex>`) in your webhook route:
+Verify incoming HMAC-SHA256 signatures (`x-checkout-signature: sha256=<hex>`) in your webhook route (supports multiple comma-separated signatures during secret rotation and prevents length mismatch errors):
 
 ```javascript
 const crypto = require("crypto");
 
 function verifyWebhookSignature(rawBody, signatureHeader, secret) {
-  const expected = "sha256=" + crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  return signatureHeader.split(",").some((part) => {
+    const a = Buffer.from(part.trim());
+    const b = Buffer.from(`sha256=${expected}`);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  });
 }
 ```
 
@@ -183,8 +187,8 @@ it can do — verify each row against the cited file:
 | `SERVER_SIGNING_SECRET` — signs SEP-10 *login* challenges for the dashboard | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`serverSigningSecret`), used in [`apps/api/src/services/container.ts`](apps/api/src/services/container.ts) | **No.** It is an identity key for authentication; it is not a signer on any seller account |
 | `JWT_SECRET` — signs Quay session JWTs | [`apps/api/src/env.ts`](apps/api/src/env.ts) (`jwtSecret`) | **No** |
 | Each seller's anchor SEP-10 JWT, AES-256-GCM encrypted at rest | `anchor_sessions.token_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts); encryption in [`apps/api/src/repos/index.ts`](apps/api/src/repos/index.ts) | **No.** See the paragraph below for exactly what it can do |
-| Seller SEP-12 KYC fields, encrypted with `KYC_ENCRYPTION_KEY` | `kyc_records.fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
-| Seller payout fields (bank details) | `sellers.payout_fields_json` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) — currently plaintext, masked in the dashboard; encrypting it at rest is tracked in [#245](https://github.com/determined-001/Quay/issues/245) | **No** |
+| Seller SEP-12 KYC fields, encrypted with `KYC_ENCRYPTION_KEY` | `seller_kyc.fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
+| Seller payout fields (bank details), AES-256-GCM encrypted at rest with `KYC_ENCRYPTION_KEY` | `sellers.payout_fields_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) (legacy `payout_fields_json` is deprecated) | **No** |
 | Webhook signing secrets (current and previous), encrypted | `webhooks.secret_encrypted` / `previous_secret_encrypted` in [`apps/api/src/db/schema.ts`](apps/api/src/db/schema.ts) | **No** |
 
 The rule all of this adds up to: **no key on the server can sign a payment
@@ -354,11 +358,8 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 - **Health**: `/health` is liveness (process is up); `/ready` is readiness
   (database is actually reachable) - the `HEALTHCHECK` and Render's
   `healthCheckPath` both use `/ready`.
-- **Size target**: under 200 MB, enforced in CI (`.github/workflows/ci.yml`'s
-  `docker` job fails the build if it isn't). Not independently measured
-  outside CI in this change - no Docker daemon was available in the
-  environment this change was authored in, so the size shown above is a
-  target the CI job checks on every push, not a number hand-verified here.
+- **Size target**: under 250 MB, enforced in CI (`.github/workflows/ci.yml`'s
+  `docker` job fails the build if it isn't, checking against `BUDGET_MB=250`).
 - **Security scanning**: the same CI job runs a Trivy scan, failing on any
   HIGH/CRITICAL finding.
 - **Read-only root filesystem**: the app writes nothing to disk in
@@ -388,7 +389,7 @@ see the `build` script in `apps/api/package.json`) and runs as the non-root
 
 ## Before you go live (the parts code can't do)
 
-1. **Verify the USDC issuer.** `.env.example` ships placeholder Circle issuers for testnet and
+1. **Verify the USDC issuer.** `.env.example` ships Circle issuers for testnet and
    public. Confirm the current issuer for your network before relying on it — a wrong issuer
    silently matches nothing (or the wrong asset).
 2. **Get a real anchor relationship first.** A checkout that dead-ends in USDC isn't the
