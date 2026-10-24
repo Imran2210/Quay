@@ -58,6 +58,65 @@ export class Sep6ValidationError extends OffRampRejectedError {
   }
 }
 
+export const RESERVED_WITHDRAW_PARAMS: ReadonlySet<string> = new Set([
+  "asset_code",
+  "amount",
+  "account",
+  "type",
+  "memo",
+  "memo_type",
+  "funding_method",
+  "lang",
+  "on_change_callback",
+  "country_code",
+  "refund_memo",
+  "refund_memo_type",
+  "customer_id",
+  "location_id",
+  "wallet_name",
+  "wallet_url",
+  "quote_id",
+]);
+
+/**
+ * Filter and validate payout fields according to the chosen SEP-6 withdrawal type.
+ *
+ * - Returns exactly the non-reserved fields declared by the anchor that the seller supplied (non-empty after trim).
+ * - A declared field that is not optional and has no non-empty value throws Sep6ValidationError naming the field.
+ * - Reserved names are never taken from payout fields: if the anchor declared one, it is skipped with a warning
+ *   and not counted as missing.
+ * - dest and dest_extra are not reserved; they are sent only when declared.
+ * - Undeclared payout fields are never returned.
+ */
+export function selectWithdrawFields(
+  typeInfo: Sep6WithdrawType,
+  payout: Record<string, string> = {},
+  logger?: Logger,
+): Record<string, string> {
+  const log = (logger ?? NOOP_LOGGER).child({ component: "sep6" });
+  const out: Record<string, string> = {};
+
+  for (const [fieldName, fieldDef] of Object.entries(typeInfo.fields ?? {})) {
+    if (RESERVED_WITHDRAW_PARAMS.has(fieldName)) {
+      log.warn(
+        { event: "anchor.sep6.withdraw.reserved_field_ignored", field: fieldName },
+        `Ignoring reserved withdrawal field "${fieldName}" declared by anchor`,
+      );
+      continue;
+    }
+
+    const raw = payout[fieldName];
+    const val = typeof raw === "string" ? raw.trim() : "";
+    if (val.length > 0) {
+      out[fieldName] = val;
+    } else if (!fieldDef.optional) {
+      throw new Sep6ValidationError(`Missing required payout field: ${fieldName}`);
+    }
+  }
+
+  return out;
+}
+
 const INFO_TTL_MS = 5 * 60_000;
 const infoCache = new Map<string, { at: number; info: Sep6Info }>();
 
@@ -243,6 +302,14 @@ export class Sep6TransactionError extends Error {
   }
 }
 
+/** Thrown when an anchor's SEP-6 response is missing required fields (e.g. withdraw id or transaction). */
+export class Sep6ResponseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "Sep6ResponseError";
+  }
+}
+
 /** SEP-6: https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0006.md */
 export async function startSep6Withdraw(
   baseUrl: string,
@@ -252,8 +319,7 @@ export async function startSep6Withdraw(
     amount: string;
     account: string;
     type: string;
-    dest?: string;
-    destExtra?: string;
+    fields?: Record<string, string>;
   },
   logger?: Logger,
 ): Promise<Sep6WithdrawResult> {
@@ -263,8 +329,22 @@ export async function startSep6Withdraw(
   url.searchParams.set("amount", input.amount);
   url.searchParams.set("account", input.account);
   url.searchParams.set("type", input.type);
-  if (input.dest) url.searchParams.set("dest", input.dest);
-  if (input.destExtra) url.searchParams.set("dest_extra", input.destExtra);
+
+  const coreParams = new Set(["asset_code", "amount", "account", "type"]);
+  if (input.fields) {
+    for (const [key, val] of Object.entries(input.fields)) {
+      if (coreParams.has(key)) {
+        log.warn(
+          { event: "anchor.sep6.withdraw.override_rejected", field: key },
+          `Refusing to override core SEP-6 withdraw parameter "${key}"`,
+        );
+        continue;
+      }
+      if (val !== undefined && val !== "") {
+        url.searchParams.set(key, val);
+      }
+    }
+  }
 
   const t0 = Date.now();
   log.info(
@@ -282,7 +362,14 @@ export async function startSep6Withdraw(
     log.warn({ event: "anchor.sep6.withdraw.fail", statusCode: res.status, durationMs: Date.now() - t0 }, "SEP-6 withdraw failed");
     throw await anchorHttpError("6", "withdraw", res);
   }
-  const body = (await res.json()) as { id: string; account_id?: string; memo?: string; memo_type?: string };
+  const body = (await res.json()) as { id?: string; account_id?: string; memo?: string; memo_type?: string };
+  if (typeof body?.id !== "string" || body.id.trim() === "") {
+    log.warn(
+      { event: "anchor.sep6.withdraw.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /withdraw response has no id",
+    );
+    throw new Sep6ResponseError("SEP-6 /withdraw response has no id, so the withdrawal cannot be tracked");
+  }
   const memoType = body.memo_type === "id" || body.memo_type === "hash" || body.memo_type === "text" ? body.memo_type : undefined;
   const out: Sep6WithdrawResult = { id: body.id, accountId: body.account_id, memo: body.memo, memoType };
   log.info(
@@ -309,9 +396,9 @@ export async function getSep6Transaction(
     throw await anchorHttpError("6", "transaction fetch", res);
   }
   const body = (await res.json()) as {
-    transaction: {
-      id: string;
-      status: string;
+    transaction?: {
+      id?: string;
+      status?: string;
       amount_out?: string;
       message?: string;
       amount_in?: string;
@@ -322,7 +409,28 @@ export async function getSep6Transaction(
       withdraw_memo_type?: string;
     };
   };
+  if (!body || typeof body !== "object" || !body.transaction || typeof body.transaction !== "object") {
+    log.warn(
+      { event: "anchor.sep6.status.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /transaction response missing transaction object",
+    );
+    throw new Sep6ResponseError("SEP-6 /transaction response has no transaction object");
+  }
   const tx = body.transaction;
+  if (typeof tx.id !== "string" || tx.id.trim() === "") {
+    log.warn(
+      { event: "anchor.sep6.status.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /transaction response missing transaction id",
+    );
+    throw new Sep6ResponseError("SEP-6 /transaction response has no transaction id");
+  }
+  if (typeof tx.status !== "string" || tx.status.trim() === "") {
+    log.warn(
+      { event: "anchor.sep6.status.fail", durationMs: Date.now() - t0 },
+      "SEP-6 /transaction response missing transaction status",
+    );
+    throw new Sep6ResponseError("SEP-6 /transaction response has no transaction status");
+  }
   const out: Sep6TransactionResult = {
     id: tx.id,
     status: tx.status,

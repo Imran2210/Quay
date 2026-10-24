@@ -119,3 +119,34 @@ describe("StellarRail.assertCanReceive — preflight cache", () => {
     expect(loadAccount).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("StellarRail.assertCanReceive — amount-aware headroom and caching", () => {
+  it("does not reuse a cached pass for a larger link amount", async () => {
+    const rail = new StellarRail(CFG);
+    const loadAccount = vi.fn().mockResolvedValue({
+      balances: [
+        {
+          asset_type: "credit_alphanum4",
+          asset_code: "USDC",
+          asset_issuer: ISSUER,
+          balance: "995",
+          limit: "1000",
+          is_authorized: true,
+        },
+      ],
+    });
+    (rail as any).server = { loadAccount };
+
+    // Link for 5 should pass (headroom is 5)
+    await expect(rail.assertCanReceive(DEST, { code: "USDC", issuer: ISSUER }, "5")).resolves.toBeUndefined();
+    expect(loadAccount).toHaveBeenCalledTimes(1);
+
+    // Re-checking with 5 should hit the cache and not call loadAccount again
+    await expect(rail.assertCanReceive(DEST, { code: "USDC", issuer: ISSUER }, "5")).resolves.toBeUndefined();
+    expect(loadAccount).toHaveBeenCalledTimes(1);
+
+    // Link for 100 exceeds headroom of 5; it must NOT reuse the cached pass for 5
+    await expect(rail.assertCanReceive(DEST, { code: "USDC", issuer: ISSUER }, "100")).rejects.toThrow(CannotReceiveError);
+    expect(loadAccount).toHaveBeenCalledTimes(2);
+  });
+});
