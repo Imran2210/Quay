@@ -6,7 +6,7 @@
   "main": "./dist/widget.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "node init && node scripts/build.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "test:coverage": "vitest run --coverage"
