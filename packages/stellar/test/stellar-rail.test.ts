@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Horizon, StrKey } from "@stellar/stellar-sdk";
+import { Account, Horizon, StrKey } from "@stellar/stellar-sdk";
 import { CannotReceiveError } from "@checkout/core";
 import { muxedFor, StellarRail } from "../src/stellar-rail";
 
@@ -81,12 +81,12 @@ describe("StellarRail.assertCanReceive — preflight cache", () => {
   });
 
   const USDC = { code: "USDC", issuer: ISSUER };
+  // A real Account: the failing path builds a SEP-7 changeTrust URI from it,
+  // which needs sequenceNumber() and friends, not just the balances.
   const accountWith = (balances: unknown[]) =>
-    ({
-      id: DEST,
-      sequence: "100",
-      balances,
-    }) as unknown as Awaited<ReturnType<Horizon.Server["loadAccount"]>>;
+    Object.assign(new Account(DEST, "100"), { balances }) as unknown as Awaited<
+      ReturnType<Horizon.Server["loadAccount"]>
+    >;
   const usdcLine = {
     asset_type: "credit_alphanum4",
     asset_code: "USDC",
